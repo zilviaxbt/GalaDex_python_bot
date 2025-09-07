@@ -1,6 +1,6 @@
-# ==========================================
+# ===========================================
 # file: README.md
-# ==========================================
+# ===========================================
 # GalaDex Arbitrage Bot
 
 Welcome to the GalaDex Arbitrage Bot! This is a simple but powerful tool designed to automatically find and execute arbitrage trading opportunities on the GalaSwap DEX.
