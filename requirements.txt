@@ -1,0 +1,8 @@
+# ==========================================
+# file: requirements.txt
+# ==========================================
+# You can `pip install -r requirements.txt`
+requests>=2.31.0
+eth-hash[pycryptodome]>=0.7.0
+coincurve>=18.0.0
+eth-keys>=0.4.0
