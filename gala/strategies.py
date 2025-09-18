@@ -67,7 +67,7 @@ def discover_active_pools(api: GalaSwapAPI, pools: Sequence[Tuple[str, str]]) ->
                 seen_fees.add((pool_key, fee))
 
                 try:
-                    # Use a configurable, larger amount to check for real liquidity
+                    # Use a configurable amount to check for real liquidity
                     api.get_quote(t_in, t_out, config.LIQUIDITY_CHECK_AMOUNT, fee)
                     active_pools.append(ActivePool(t_in, t_out, fee))
                     print(f"  [ok] {t_in}-{t_out} (fee: {fee}) is active.")
@@ -75,47 +75,129 @@ def discover_active_pools(api: GalaSwapAPI, pools: Sequence[Tuple[str, str]]) ->
                     print(f"  [--] {t_in}-{t_out} (fee: {fee}) is inactive.")
                     continue
     print(f"Found {len(active_pools)} active pool-fee combinations.")
+
+    # >>> Step 3 debug: show which triangle edge(s) are missing for GUSDC–GALA–GWETH
+    def _has_edge(a: str, b: str, aps: List[ActivePool]) -> bool:
+        return any(
+            (p.token_a == a and p.token_b == b) or
+            (p.token_a == b and p.token_b == a)
+            for p in aps
+        )
+
+    _required = [('GUSDC', 'GALA'), ('GALA', 'GWETH'), ('GWETH', 'GUSDC')]
+    _missing = [f"{a} ↔ {b}" for (a, b) in _required if not _has_edge(a, b, active_pools)]
+
+    if _missing:
+        print("🧩 Missing edge(s) for triangle:", ", ".join(_missing))
+    else:
+        print("✅ All three triangle edges are active — triangles should be possible now.")
+    # <<< end debug
+
     return active_pools
 
 
 def enumerate_triangles(active_pools: List[ActivePool]) -> List[Tuple[str, str, str]]:
-    # Build adjacency list from active, directed pools
+    """
+    Return directed triangles (a,b,c) meaning we will simulate a->b, b->c, c->a.
+    Only include edges that are actually active in that direction.
+    """
+    # Build DIRECTED adjacency from the discovered active pools (direction matters!)
     adj: Dict[str, set] = {}
-    for pool in active_pools:
-        adj.setdefault(pool.token_a, set()).add(pool.token_b)
-        adj.setdefault(pool.token_b, set()).add(pool.token_a)
+    for p in active_pools:
+        adj.setdefault(p.token_a, set()).add(p.token_b)
 
-    tokens = sorted(adj.keys())
-    seen = set()
-    cycles: List[Tuple[str, str, str]] = []
+    rotations: List[Tuple[str, str, str]] = []
+    tokens = list(adj.keys())
+
     for a in tokens:
-        for b in adj.get(a, set()):
-            for c in adj.get(b, set()):
-                if c in adj and a in adj.get(c, set()) and a != b and b != c and a != c:
-                    cyc = tuple(sorted((a, b, c)))
-                    if cyc not in seen:
-                        seen.add(cyc)
-                        # Return the cycle starting with the token that is first alphabetically
-                        # This is just a canonical representation.
-                        cycles.append(cyc)
-    return [c for c in cycles for c in [(c[0], c[1], c[2]), (c[0], c[2], c[1])]]
+        for b in adj.get(a, ()):
+            if b == a:
+                continue
+            for c in adj.get(b, ()):
+                if c in (a, b):
+                    continue
+                # require closing edge c -> a to form a directed 3-cycle
+                if a in adj.get(c, ()):
+                    # return the three rotations so start_token alignment can work
+                    rotations.extend([
+                        (a, b, c),
+                        (b, c, a),
+                        (c, a, b),
+                    ])
+
+    # De-duplicate identical tuples that may appear due to multiple fees
+    unique = list(dict.fromkeys(rotations))
+    return unique
+
+
+# -------- Quote helper with fallback/backoff ----------------------------------
+def _best_quote_safe(api: GalaSwapAPI, t_in: str, t_out: str, amount: Decimal) -> Quote:
+    """
+    Try to get a quote. If the full amount fails, clamp to ARB_MAX_HOP_INPUT and back off.
+    """
+    try:
+        from . import config
+        max_in = Decimal(str(getattr(config, "MAX_HOP_INPUT", Decimal("0")) or Decimal("0")))
+    except Exception:
+        max_in = Decimal("0")
+
+    amt0 = amount
+    if max_in > 0 and amt0 > max_in:
+        amt0 = max_in
+
+    last_err = None
+    for factor in [Decimal("1"), Decimal("0.5"), Decimal("0.2"), Decimal("0.1"), Decimal("0.05")]:
+        amt_try = (amt0 * factor).quantize(Decimal("0.00000001"))
+        try:
+            return api.best_quote(t_in, t_out, amt_try)
+        except Exception as e:
+            last_err = e
+    raise last_err  # type: ignore[misc]
+
 
 
 def simulate_cycle(api: GalaSwapAPI, cycle: Tuple[str, str, str], start_token: str, amount: Decimal) -> CycleResult | None:
     a, b, c = cycle
-    if start_token != a:
-        # This logic assumes we always start the cycle enumeration from the start_token
-        # The new enumerate_triangles returns all rotations, so we just find the one starting with our token
+
+    # If the start token isn't in this triangle, skip
+    if start_token not in (a, b, c):
         return None
+
+    # Rotate so the start_token comes first
+    if start_token != a:
+        seq = [a, b, c]
+        i = seq.index(start_token)
+        a, b, c = seq[i], seq[(i + 1) % 3], seq[(i + 2) % 3]
 
     hops: List[Hop] = []
 
-    # Hop 1: a->b
-    q1 = api.best_quote(a, b, amount)
-    # Hop 2: b->c (use output of hop1)
-    q2 = api.best_quote(b, c, q1.amount_out)
-    # Hop 3: c->a (close the loop)
-    q3 = api.best_quote(c, a, q2.amount_out)
+    # --- DEBUGGED QUOTE SEQUENCE with fallback ---
+    try:
+        # Hop 1: a->b
+        q1 = _best_quote_safe(api, a, b, amount)
+        print(f"   ↪️  Hop1 {a}->{b} | in={q1.amount_in} | out={q1.amount_out} | fee={q1.fee_used}")
+        if q1.amount_out <= 0:
+            print(f"   ⚠️  Hop1 produced non-positive out; dropping cycle.")
+            return None
+
+        # Hop 2: b->c (use output of hop1)
+        q2 = _best_quote_safe(api, b, c, q1.amount_out)
+        print(f"   ↪️  Hop2 {b}->{c} | in={q2.amount_in} | out={q2.amount_out} | fee={q2.fee_used}")
+        if q2.amount_out <= 0:
+            print(f"   ⚠️  Hop2 produced non-positive out; dropping cycle.")
+            return None
+
+        # Hop 3: c->a (close the loop)
+        q3 = _best_quote_safe(api, c, a, q2.amount_out)
+        print(f"   ↪️  Hop3 {c}->{a} | in={q3.amount_in} | out={q3.amount_out} | fee={q3.fee_used}")
+        if q3.amount_out <= 0:
+            print(f"   ⚠️  Hop3 produced non-positive out; dropping cycle.")
+            return None
+
+    except Exception as e:
+        print(f"   ❌ Quote error on cycle {a}->{b}->{c}->{a}: {e}")
+        return None
+    # --- END DEBUGGED QUOTE SEQUENCE ---
 
     hops.append(Hop(a, b, q1.fee_used or 0, q1.amount_in, q1.amount_out))
     hops.append(Hop(b, c, q2.fee_used or 0, q2.amount_in, q2.amount_out))
@@ -124,6 +206,10 @@ def simulate_cycle(api: GalaSwapAPI, cycle: Tuple[str, str, str], start_token: s
     final_amt = q3.amount_out
     gain = (final_amt - amount) / amount
     gross_bps = int(gain * Decimal(10_000))
+
+    # DEBUG: print every simulated cycle and its profit in BPS
+    print(f"🔎 Cycle {a}->{b}->{c}->{a} | in={amount} {a} | out={final_amt} {a} | gross={gross_bps} bps")
+
     return CycleResult(path=hops, start_token=a, start_amount=amount, final_amount=final_amt, gross_profit_bps=gross_bps)
 
 
@@ -147,3 +233,4 @@ def prepare_payloads(api: GalaSwapAPI, res: CycleResult, slippage_bps: int) -> L
             payload=payload,
         ))
     return prepared
+
