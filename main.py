@@ -5,15 +5,33 @@ from decimal import Decimal
 import sys
 import time
 
+# --- Load .env BEFORE importing config so config sees the values ---
+try:
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(dotenv_path=find_dotenv(), override=False)
+except Exception:
+    # If python-dotenv isn't installed, the bot will still run using OS env vars
+    pass
+
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(dotenv_path=find_dotenv(), override=True)
+
+
 import gala.config as config
 from gala.gala_api import GalaSwapAPI
 from gala.strategies import enumerate_triangles, simulate_cycle, prepare_payloads, discover_active_pools
 
-
 BUNDLE_SWAP_TYPE_CANDIDATES = ["swap", "Swap"]
 
-
 def main() -> int:
+    # Quick sanity echo so you can see the effective config at startup
+    print(
+        f"[init] user={config.USER_ADDRESS or '<missing>'} | "
+        f"start={config.START_AMOUNT} {config.START_TOKEN} | "
+        f"dry_run={'YES' if config.DRY_RUN else 'NO'} | "
+        f"min_profit={config.MIN_PROFIT_BPS}+{config.PROFIT_BUFFER_BPS} bps"
+    )
+
     if not config.USER_ADDRESS:
         print("[!] USER_ADDRESS missing (env GALA_USER_ADDR). Aborting.")
         return 2
@@ -54,8 +72,8 @@ def main() -> int:
                 continue
             try:
                 res = simulate_cycle(api, cyc, config.START_TOKEN, config.START_AMOUNT)
-            except Exception as e:
-                # This can be noisy, enable for debugging
+            except Exception:
+                # noisy on purpose only when debugging
                 # print(f"[warn] Simulation failed for cycle {cyc}: {e}")
                 continue
             if res is None:
@@ -69,8 +87,11 @@ def main() -> int:
             time.sleep(config.SCAN_INTERVAL_SECONDS)
             continue
 
-        print(f"Best cycle {best.path[0].token_in}->{best.path[0].token_out}->{best.path[1].token_out}->{best.path[2].token_out}->{best.start_token} | "
-              f"in={best.start_amount} out={best.final_amount} profit={best.gross_profit_bps} bps")
+        print(
+            f"Best cycle {best.path[0].token_in}->{best.path[0].token_out}"
+            f"->{best.path[1].token_out}->{best.path[2].token_out}->{best.start_token} | "
+            f"in={best.start_amount} out={best.final_amount} profit={best.gross_profit_bps} bps"
+        )
 
         threshold = config.MIN_PROFIT_BPS + config.PROFIT_BUFFER_BPS
         if best.gross_profit_bps < threshold:
@@ -86,7 +107,8 @@ def main() -> int:
         if config.DRY_RUN:
             print("[dry-run] Would execute hops:")
             for i, hop in enumerate(prepared, 1):
-                print(f"  Hop {i}: {hop.token_in}->{hop.token_out} fee={hop.fee} in={hop.quote_in} minOut≈{hop.quote_out*(Decimal(1)-Decimal(config.SLIPPAGE_BPS)/Decimal(10_000))}")
+                min_out = hop.quote_out * (Decimal(1) - Decimal(config.SLIPPAGE_BPS) / Decimal(10_000))
+                print(f"  Hop {i}: {hop.token_in}->{hop.token_out} fee={hop.fee} in={hop.quote_in} minOut≈{min_out}")
             scan_count += 1
             time.sleep(config.SCAN_INTERVAL_SECONDS)
             continue
@@ -108,8 +130,7 @@ def main() -> int:
                     continue
             if tx_id is None:
                 print(f"[error] bundle submission failed for hop {i}: {last_err}")
-                # Decide if you want to stop the whole bot on a single failure
-                break  # break from the hop loop
+                break
             print(f"  -> tx id: {tx_id}")
             tx_ids.append(tx_id)
 
