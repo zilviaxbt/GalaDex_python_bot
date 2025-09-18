@@ -9,6 +9,26 @@ Welcome to the GalaDex Arbitrage Bot! This is a simple but powerful tool designe
 
 ---
 
+## ⚙️ Configuration
+
+This bot uses a `.env` file for secrets and settings. You **must** create it yourself.
+
+Example `.env` file:
+
+GALA_PRIVATE_KEY=0xyourprivatekey_here
+GALA_USER_ADDR=eth|0xyourwalletaddress_here
+DRY_RUN=true
+START_TOKEN=GUSDC
+START_AMOUNT=100
+SCAN_INTERVAL_SECONDS=30
+MIN_PROFIT_BPS=50
+PROFIT_BUFFER_BPS=20
+
+⚠️ **Never commit your real `.env` file**.  
+Your `.gitignore` already protects it, but double-check before pushing.
+
+---
+
 ## What is Arbitrage Trading?
 
 Arbitrage is a trading strategy that takes advantage of small price differences for the same asset across different markets. In our case, the "markets" are different trading pools on the GalaSwap DEX.
